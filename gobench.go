@@ -31,6 +31,9 @@ var (
 	writeTimeout     int
 	readTimeout      int
 	authHeader       string
+	insecSkip        bool
+	sessionTicket    bool
+	sessionCache     bool
 )
 
 type Configuration struct {
@@ -90,6 +93,9 @@ func init() {
 	flag.IntVar(&writeTimeout, "tw", 5000, "Write timeout (in milliseconds)")
 	flag.IntVar(&readTimeout, "tr", 5000, "Read timeout (in milliseconds)")
 	flag.StringVar(&authHeader, "auth", "", "Authorization header")
+	flag.BoolVar(&insecSkip, "tls_skip", false, "if skip insecure verify when tls.")
+	flag.BoolVar(&sessionTicket, "tls_ticket", true, "if use tls session ticket.")
+	flag.BoolVar(&sessionCache, "tls_cache", true, "if use tls session cache.")
 }
 
 func printResults(results map[int]*Result, startTime time.Time) {
@@ -149,6 +155,16 @@ func readLines(path string) (lines []string, err error) {
 		err = nil
 	}
 	return
+}
+
+type fakeSessionCache struct{}
+
+func (fakeSessionCache) Get(sessionKey string) (*tls.ClientSessionState, bool) {
+	return nil, false
+}
+
+func (fakeSessionCache) Put(sessionKey string, cs *tls.ClientSessionState) {
+	// no-op
 }
 
 func NewConfiguration() *Configuration {
@@ -234,8 +250,15 @@ func NewConfiguration() *Configuration {
 	configuration.myClient.MaxConnsPerHost = clients
 
 	configuration.myClient.Dial = MyDialer()
-	configuration.myClient.TLSConfig = &tls.Config{InsecureSkipVerify: true}
-
+	configuration.myClient.TLSConfig = &tls.Config{}
+	configuration.myClient.TLSConfig.InsecureSkipVerify = insecSkip
+	/* It's a bug in library fasthttp, when sessiontick is disabled, 
+	   sessionCache is also disabled. */
+	configuration.myClient.TLSConfig.SessionTicketsDisabled = !sessionTicket
+	if sessionCache == false {
+		configuration.myClient.TLSConfig.ClientSessionCache = fakeSessionCache{}
+	}
+	
 	return configuration
 }
 

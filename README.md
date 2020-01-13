@@ -1,3 +1,16 @@
+Perface
+================
+forked by Cao Tong, as the original author do not accept push reqeust along 
+more than three years.
+
+History
+================
+2020-01-13 by Cao Tong
+add three parameters for HTTPS
+1. tls_skip, if skip insecture verify or not.
+2. tls_ticket, a flag for disable session ticket.
+3. tls_cache, a flag for disable client session cache (resumption).
+
 Introduction
 ================
 
@@ -67,7 +80,7 @@ Usage
     
     ```
     GOPATH=/tmp/ go get github.com/valyala/fasthttp
-    GOPATH=/tmp/ go get github.com/cmpxchg16/gobench
+    GOPATH=/tmp/ go get github.com/tony-caotong/gobench
     ```
 
 3. run some http server on port 80

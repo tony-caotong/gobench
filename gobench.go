@@ -34,6 +34,7 @@ var (
 	insecSkip        bool
 	sessionTicket    bool
 	sessionCache     bool
+	tlsVersion       int
 )
 
 type Configuration struct {
@@ -96,6 +97,7 @@ func init() {
 	flag.BoolVar(&insecSkip, "tls_skip", false, "if skip insecure verify when tls.")
 	flag.BoolVar(&sessionTicket, "tls_ticket", true, "if use tls session ticket.")
 	flag.BoolVar(&sessionCache, "tls_cache", true, "if use tls session cache.")
+	flag.IntVar(&tlsVersion, "ver", 0, "Version of tls: 10/11/12/13. ")
 }
 
 func printResults(results map[int]*Result, startTime time.Time) {
@@ -258,7 +260,21 @@ func NewConfiguration() *Configuration {
 	if sessionCache == false {
 		configuration.myClient.TLSConfig.ClientSessionCache = fakeSessionCache{}
 	}
-	
+	switch tlsVersion {
+	case 10:
+		configuration.myClient.TLSConfig.MinVersion = tls.VersionTLS10
+		configuration.myClient.TLSConfig.MaxVersion = tls.VersionTLS10
+	case 11:
+		configuration.myClient.TLSConfig.MinVersion = tls.VersionTLS11
+		configuration.myClient.TLSConfig.MaxVersion = tls.VersionTLS11
+	case 12:
+		configuration.myClient.TLSConfig.MinVersion = tls.VersionTLS12
+		configuration.myClient.TLSConfig.MaxVersion = tls.VersionTLS12
+	case 13:
+		configuration.myClient.TLSConfig.MinVersion = tls.VersionTLS13
+		configuration.myClient.TLSConfig.MaxVersion = tls.VersionTLS13
+	}
+
 	return configuration
 }
 

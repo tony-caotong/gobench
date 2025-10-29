@@ -16,8 +16,25 @@ import (
 	"sync/atomic"
 	"time"
 	"crypto/tls"
+	"strings"
+	"encoding/binary"
+	"encoding/hex"
 
 	"github.com/valyala/fasthttp"
+)
+
+const (
+	PP2_SIGNATURE = "\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A"
+	PP2_VERSION = 0x20
+	PP2_CMD_LOCAL byte = 0x00
+	PP2_CMD_PROXY byte = 0x01
+	PP2_AF_UNSPEC byte = 0x00
+	PP2_AF_INET byte = 0x10      // IPv4
+	PP2_AF_INET6 byte = 0x20     // IPv6
+	PP2_AF_UNIX byte = 0x30      // Unix
+	PP2_TRANS_UNSPEC byte = 0x00
+	PP2_TRANS_STREAM byte = 0x01 // TCP
+	PP2_TRANS_DGRAM byte = 0x02  // UDP	
 )
 
 var (
@@ -35,6 +52,15 @@ var (
 	sessionTicket    bool
 	sessionCache     bool
 	tlsVersion       int
+	proxyProtocolVersion int
+	proxyProtocolSrcIP string
+	proxyProtocolSrcPort int
+	proxyProtocolDstIP string
+	proxyProtocolDstPort int
+	proxyProtocolV2Command string
+	proxyProtocolV2Transport string
+	proxyProtocolV2TLV string
+	debug bool
 )
 
 type Configuration struct {
@@ -83,6 +109,131 @@ func (this *MyConn) Write(b []byte) (n int, err error) {
 	return len, err
 }
 
+func (this *MyConn) writeProxyProtocolV1(srcIP, dstIP string, srcPort, dstPort int) error {
+	var protocol string
+	if net.ParseIP(srcIP).To4() != nil && net.ParseIP(dstIP).To4() != nil {
+		protocol = "TCP4"
+	} else {
+		protocol = "TCP6"
+	}
+
+	header := fmt.Sprintf("PROXY %s %s %s %d %d\r\n", protocol, srcIP, dstIP, srcPort, dstPort)
+	_, err := this.Write([]byte(header))
+	return err
+}
+
+func (this *MyConn) writeProxyProtocolV2(srcIP, dstIP string, srcPort, dstPort int) error {
+	conn := this.Conn
+	var header []byte
+	var familyProtocol byte
+	var addrData []byte
+    
+	signature := []byte(PP2_SIGNATURE)
+    
+	var cmd byte
+	switch strings.ToUpper(proxyProtocolV2Command) {
+	case "LOCAL":
+		cmd = PP2_CMD_LOCAL
+	default:
+		cmd = PP2_CMD_PROXY
+	}
+
+	versionCmd := PP2_VERSION | cmd
+
+	if cmd == PP2_CMD_LOCAL {
+		header = make([]byte, len(signature)+1)
+		copy(header, signature)
+		header[len(signature)] = versionCmd
+	} else {
+		srcIPParsed := net.ParseIP(srcIP)
+		dstIPParsed := net.ParseIP(dstIP)
+
+		if srcIPParsed == nil || dstIPParsed == nil {
+			return fmt.Errorf("invalid IP address: src=%s, dst=%s", srcIP, dstIP)
+		}
+
+		trans := PP2_TRANS_STREAM
+		if strings.ToUpper(proxyProtocolV2Transport) == "DGRAM" {
+			trans = PP2_TRANS_DGRAM
+		}
+		
+		if srcIPParsed.To4() != nil && dstIPParsed.To4() != nil {
+			familyProtocol = PP2_AF_INET | trans
+			addrData = make([]byte, 12)
+			copy(addrData[0:4], srcIPParsed.To4())
+			copy(addrData[4:8], dstIPParsed.To4())
+			binary.BigEndian.PutUint16(addrData[8:10], uint16(srcPort))
+			binary.BigEndian.PutUint16(addrData[10:12], uint16(dstPort))
+		} else {
+			familyProtocol = PP2_AF_INET6 | trans
+			addrData = make([]byte, 36)
+			copy(addrData[0:16], srcIPParsed.To16())
+			copy(addrData[16:32], dstIPParsed.To16())
+			binary.BigEndian.PutUint16(addrData[32:34], uint16(srcPort))
+			binary.BigEndian.PutUint16(addrData[34:36], uint16(dstPort))
+		}
+
+		addrLen := len(addrData)
+		tlvLen := 0
+		var tlvBytes []byte
+
+		if proxyProtocolV2TLV != "" {
+			var err error
+			tlvBytes, err = hex.DecodeString(proxyProtocolV2TLV)
+			if err != nil {
+				return fmt.Errorf("invalid TLV data: %v", err)
+			}
+			tlvLen = len(tlvBytes)
+		}
+		
+		totalLen := uint16(addrLen + tlvLen)
+		header = make([]byte, len(signature)+4+addrLen+tlvLen)
+		pos := 0
+
+		copy(header[pos:], signature)
+		pos += len(signature)
+
+		header[pos] = versionCmd
+		pos++
+
+		header[pos] = familyProtocol
+		pos++
+
+		binary.BigEndian.PutUint16(header[pos:pos+2], totalLen)
+		pos += 2
+
+		copy(header[pos:], addrData)
+		pos += addrLen
+
+		if tlvLen > 0 {
+			copy(header[pos:], tlvBytes)
+		}
+
+		if debug {
+			fmt.Printf("Proxy Protocol v2 header (%d bytes):\n", len(header))
+			fmt.Printf("  Signature: ")
+			for i := 0; i < 12; i++ {
+				fmt.Printf("%02x ", header[i])
+			}
+			fmt.Printf("\n")
+			fmt.Printf("  Version/Command: 0x%02x\n", header[12])
+			fmt.Printf("  Family/Protocol: 0x%02x\n", header[13])
+			fmt.Printf("  Length: %d\n", binary.BigEndian.Uint16(header[14:16]))
+            
+			if addrLen > 0 {
+				fmt.Printf("  Address data: ")
+				for i := 16; i < 16+addrLen && i < len(header); i++ {
+					fmt.Printf("%02x ", header[i])
+				}
+				fmt.Printf("\n")
+			}
+		}
+	}
+
+	_, err := conn.Write(header)
+	return err
+}
+
 func init() {
 	flag.Int64Var(&requests, "r", -1, "Number of requests per client")
 	flag.IntVar(&clients, "c", 100, "Number of concurrent clients")
@@ -98,6 +249,15 @@ func init() {
 	flag.BoolVar(&sessionTicket, "tls_ticket", true, "if use tls session ticket.")
 	flag.BoolVar(&sessionCache, "tls_cache", true, "if use tls session cache.")
 	flag.IntVar(&tlsVersion, "ver", 0, "Version of tls: 10/11/12/13. ")
+	flag.IntVar(&proxyProtocolVersion, "proxy-protocol-version", 0, "Proxy Protocol version: 0(off), 1 or 2")
+	flag.StringVar(&proxyProtocolSrcIP, "proxy-protocol-src-ip", "", "Source IP for Proxy Protocol")
+	flag.IntVar(&proxyProtocolSrcPort, "proxy-protocol-src-port", 0, "Source port for Proxy Protocol")
+	flag.StringVar(&proxyProtocolDstIP, "proxy-protocol-dst-ip", "", "Destination IP for Proxy Protocol")
+	flag.IntVar(&proxyProtocolDstPort, "proxy-protocol-dst-port", 0, "Destination port for Proxy Protocol")
+	flag.StringVar(&proxyProtocolV2Command, "proxy-protocol-v2-command", "PROXY", "Proxy Protocol v2 command (PROXY or LOCAL)")
+	flag.StringVar(&proxyProtocolV2Transport, "proxy-protocol-v2-transport", "STREAM", "Proxy Protocol v2 transport (STREAM or DGRAM)")
+	flag.StringVar(&proxyProtocolV2TLV, "proxy-protocol-v2-tlv", "", "Proxy Protocol v2 TLV data in hex format")
+	flag.BoolVar(&debug, "debug", false, "print debug info")	
 }
 
 func printResults(results map[int]*Result, startTime time.Time) {
@@ -286,6 +446,38 @@ func MyDialer() func(address string) (conn net.Conn, err error) {
 		}
 
 		myConn := &MyConn{Conn: conn}
+		conn = myConn.Conn;
+		if proxyProtocolVersion > 0 {
+			localAddr := conn.LocalAddr().(*net.TCPAddr)
+			remoteAddr := conn.RemoteAddr().(*net.TCPAddr)
+
+			srcIP := proxyProtocolSrcIP
+			if srcIP == "" {
+				srcIP = localAddr.IP.String()
+			}
+			dstIP := proxyProtocolDstIP
+			if dstIP == "" {
+				dstIP = remoteAddr.IP.String()
+			}
+			srcPort := proxyProtocolSrcPort
+			if srcPort == 0 {
+				srcPort = localAddr.Port
+			}
+			dstPort := proxyProtocolDstPort
+			if dstPort == 0 {
+				dstPort = remoteAddr.Port
+			}
+
+			if proxyProtocolVersion == 2 {
+				err = myConn.writeProxyProtocolV2(srcIP, dstIP, srcPort, dstPort)
+			} else {
+				err = myConn.writeProxyProtocolV1(srcIP, dstIP, srcPort, dstPort)
+			}
+			if err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("failed to write proxy protocol header: %v", err)
+			}
+		}
 
 		return myConn, nil
 	}
